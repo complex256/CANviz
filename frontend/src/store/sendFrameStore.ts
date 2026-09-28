@@ -1,6 +1,11 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import { apiSendFrame, apiDbcEncode, apiDbcDecode } from '../api/client';
+import {
+  apiSendFrame, apiDbcEncode, apiDbcDecode,
+  apiE2EStart, apiE2ESend, apiE2EStop, apiE2EStopAll,
+  type E2EConfig,
+} from '../api/client';
+import { parseE2EConfig } from './e2e';
 import { useDbcStore } from './dbcStore';
 import type { DbcMessage } from '../types/can';
 
@@ -29,13 +34,15 @@ export interface TransmitFrame {
   isExtended: boolean;
   intervalMs: number;   // 0 = manual only
   dbc:        FrameDbcLink | null;
+  // AUTOSAR E2E protection: counter + CRC recomputed per send (backend-driven)
+  e2e:        E2EConfig | null;
   isRunning:  boolean;
   lastSent:   string | null;
   error:      string | null;
 }
 
 // The persistable part of a frame — runtime state (timers, feedback) is dropped
-export type SavedFrame = Pick<TransmitFrame, 'label' | 'canId' | 'dlc' | 'data' | 'isExtended' | 'intervalMs' | 'dbc'>;
+export type SavedFrame = Pick<TransmitFrame, 'label' | 'canId' | 'dlc' | 'data' | 'isExtended' | 'intervalMs' | 'dbc' | 'e2e'>;
 
 export interface FrameSet {
   name:    string;
@@ -45,7 +52,8 @@ export interface FrameSet {
 
 // On-disk format for Export / Import
 export const FRAME_SET_FILE_FORMAT = 'canviz-send-frames';
-export const FRAME_SET_FILE_VERSION = 1;
+// v2 adds the optional per-frame "e2e" object; v1 files still load (e2e absent).
+export const FRAME_SET_FILE_VERSION = 2;
 
 export interface FrameSetFile {
   format:  typeof FRAME_SET_FILE_FORMAT;
@@ -57,7 +65,7 @@ function makeFrame(): TransmitFrame {
   return {
     id: uid(), label: '', canId: '0x123', dlc: 8,
     data: '00 00 00 00 00 00 00 00',
-    isExtended: false, intervalMs: 100, dbc: null,
+    isExtended: false, intervalMs: 100, dbc: null, e2e: null,
     isRunning: false, lastSent: null, error: null,
   };
 }
@@ -67,6 +75,8 @@ function toSaved(f: TransmitFrame): SavedFrame {
     label: f.label, canId: f.canId, dlc: f.dlc,
     data: f.data, isExtended: f.isExtended, intervalMs: f.intervalMs,
     dbc: f.dbc ? { message: f.dbc.message, signals: { ...f.dbc.signals } } : null,
+    // structuredClone keeps any unknown keys a newer file carried, for round-trip
+    e2e: f.e2e ? structuredClone(f.e2e) : null,
   };
 }
 
@@ -96,6 +106,7 @@ function fromSaved(s: Partial<SavedFrame>): TransmitFrame {
     isExtended: !!s.isExtended,
     intervalMs: Number.isFinite(intervalMs) && intervalMs >= 0 ? intervalMs : base.intervalMs,
     dbc:        parseDbcLink(s.dbc),
+    e2e:        parseE2EConfig(s.e2e),
   };
 }
 
@@ -141,6 +152,16 @@ async function doSend(f: TransmitFrame): Promise<string> {
     `${f.isExtended ? '[EXT]' : '[STD]'} 0x${id.toString(16).toUpperCase()}` +
     ` [${f.dlc}] ${trimmed.map((b) => b.toString(16).toUpperCase().padStart(2, '0')).join(' ')}`
   );
+}
+
+// Build the payload for the server-side E2E endpoints from a frame's template
+function e2ePayload(f: TransmitFrame) {
+  const id = parseId(f.canId);
+  if (id === null) throw new Error('Invalid CAN ID');
+  const data = parseBytes(f.data);
+  if (data === null) throw new Error('Invalid data bytes');
+  while (data.length < f.dlc) data.push(0);
+  return { key: f.id, id, data: data.slice(0, f.dlc), dlc: f.dlc, is_extended_id: f.isExtended, e2e: f.e2e! };
 }
 
 /**
@@ -209,6 +230,10 @@ interface SendFrameStore {
   addDbcFrame:      (message: string) => void;
   attachDbcMessage: (id: string, message: string | null) => Promise<void>;
   setSignalValue:   (id: string, signal: string, value: number) => Promise<void>;
+
+  // E2E integration
+  setE2E:      (id: string, cfg: E2EConfig | null) => void;
+  updateE2E:   (id: string, patch: Partial<E2EConfig>) => void;
 }
 
 export const useSendFrameStore = create<SendFrameStore>()(
@@ -224,6 +249,9 @@ export const useSendFrameStore = create<SendFrameStore>()(
       removeFrame: (id) => {
         if (timers.has(id)) { clearInterval(timers.get(id)!); timers.delete(id); }
         dbcSeq.delete(id);
+        const frame = get().frames.find((f) => f.id === id);
+        // Stop and forget any server-side E2E job for this frame
+        if (frame?.e2e) void apiE2EStop(id, true).catch(() => { /* ignore */ });
         set((s) => ({ frames: s.frames.filter((f) => f.id !== id), dirty: true }));
       },
 
@@ -243,13 +271,27 @@ export const useSendFrameStore = create<SendFrameStore>()(
           const bytes = parseBytes(patch.data);
           if (bytes !== null) void decodeInto(id, before.dbc.message, bytes);
         }
+        // Template / DLC edit on a running E2E frame: update the server job
+        if (before?.e2e && (patch.data !== undefined || patch.dlc !== undefined ||
+            patch.canId !== undefined || patch.isExtended !== undefined)) {
+          pushE2EUpdate(id);
+        }
       },
 
       sendOnce: async (id) => {
         const frame = get().frames.find((f) => f.id === id);
         if (!frame) return;
         try {
-          const lastSent = await doSend(frame);
+          let lastSent: string;
+          if (frame.e2e) {
+            // Server computes the counter + CRC and returns the actual bytes
+            const job = await apiE2ESend(e2ePayload(frame));
+            const bytes = job.last_data ?? [];
+            lastSent = `${frame.isExtended ? '[EXT]' : '[STD]'} ${frame.canId} [${bytes.length}] ` +
+              `${toHex(bytes)}  (E2E cnt ${job.last_counter})`;
+          } else {
+            lastSent = await doSend(frame);
+          }
           set((s) => ({ frames: s.frames.map((f) => f.id === id ? { ...f, lastSent, error: null } : f) }));
         } catch (e) {
           set((s) => ({ frames: s.frames.map((f) => f.id === id ? { ...f, error: (e as Error).message } : f) }));
@@ -259,6 +301,20 @@ export const useSendFrameStore = create<SendFrameStore>()(
       toggleTimer: (id) => {
         const frame = get().frames.find((f) => f.id === id);
         if (!frame) return;
+
+        // E2E frames are driven by a server-side task (counter + CRC per send)
+        if (frame.e2e) {
+          if (frame.isRunning) {
+            void apiE2EStop(id).catch(() => { /* ignore */ });
+            patchFrame(id, { isRunning: false });
+          } else {
+            if (frame.intervalMs <= 0) return;
+            patchFrame(id, { isRunning: true, error: null });
+            apiE2EStart({ ...e2ePayload(frame), interval_ms: frame.intervalMs })
+              .catch((e) => patchFrame(id, { isRunning: false, error: (e as Error).message }));
+          }
+          return;
+        }
 
         if (frame.isRunning) {
           if (timers.has(id)) { clearInterval(timers.get(id)!); timers.delete(id); }
@@ -283,6 +339,10 @@ export const useSendFrameStore = create<SendFrameStore>()(
       stopAll: () => {
         for (const timer of timers.values()) clearInterval(timer);
         timers.clear();
+        // Stop any server-side E2E jobs for frames currently running
+        if (get().frames.some((f) => f.e2e && f.isRunning)) {
+          void apiE2EStopAll().catch(() => { /* ignore */ });
+        }
         set((s) => ({ frames: s.frames.map((f) => ({ ...f, isRunning: false })) }));
       },
 
@@ -382,6 +442,25 @@ export const useSendFrameStore = create<SendFrameStore>()(
         await encodeInto(id);
       },
 
+      setE2E: (id, cfg) => {
+        patchFrame(id, { e2e: cfg, error: null });
+        set({ dirty: true });
+        pushE2EUpdate(id);
+      },
+
+      updateE2E: (id, patch) => {
+        const frame = get().frames.find((f) => f.id === id);
+        if (!frame?.e2e) return;
+        // Merge; crc is nested so merge it explicitly
+        const merged: E2EConfig = {
+          ...frame.e2e, ...patch,
+          crc: patch.crc ? { ...frame.e2e.crc, ...patch.crc } : frame.e2e.crc,
+        };
+        patchFrame(id, { e2e: merged });
+        set({ dirty: true });
+        pushE2EUpdate(id);
+      },
+
       currentAsSet: () => ({
         name: get().activeSet ?? 'frames',
         savedAt: Date.now(),
@@ -419,6 +498,22 @@ function patchFrame(id: string, patch: Partial<TransmitFrame>) {
   useSendFrameStore.setState((s) => ({
     frames: s.frames.map((f) => (f.id === id ? { ...f, ...patch } : f)),
   }));
+}
+
+/**
+ * When an E2E frame's template or config changes while it is transmitting,
+ * push the new parameters to the server job (start() updates in place). The
+ * counter keeps advancing from where it was.
+ */
+function pushE2EUpdate(id: string) {
+  const frame = useSendFrameStore.getState().frames.find((f) => f.id === id);
+  if (!frame?.e2e || !frame.isRunning || frame.intervalMs <= 0) return;
+  try {
+    void apiE2EStart({ ...e2ePayload(frame), interval_ms: frame.intervalMs })
+      .catch((e) => patchFrame(id, { error: (e as Error).message }));
+  } catch (e) {
+    patchFrame(id, { error: (e as Error).message });
+  }
 }
 
 /** Re-encode a DBC-linked frame's payload from its signal values */

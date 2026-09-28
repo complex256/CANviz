@@ -11,6 +11,7 @@ GET  /status     - current connection state
 from fastapi import APIRouter, HTTPException
 
 from canviz.bus import bus_manager
+from canviz.e2e_sender import e2e_sender
 from canviz.config import settings
 from canviz.models import ConnectRequest, ConnectionStatus
 from canviz.ws_broadcaster import broadcaster
@@ -63,6 +64,7 @@ async def connect(req: ConnectRequest):
 
 @router.post("/disconnect", response_model=ConnectionStatus)
 async def disconnect():
+    await e2e_sender.stop_all()
     bus_manager.remove_frame_callback(broadcaster.on_frame)
     stats.on_disconnect()
     broadcaster.clear_queue()

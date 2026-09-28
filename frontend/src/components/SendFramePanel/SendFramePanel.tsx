@@ -4,6 +4,8 @@ import { useDbcStore } from '../../store/dbcStore';
 import { useSendFrameStore } from '../../store/sendFrameStore';
 import { FrameSetToolbar } from './FrameSetToolbar';
 import { DbcSignalEditor } from './DbcSignalEditor';
+import { E2EEditor } from './E2EEditor';
+import { defaultE2EConfig } from '../../store/e2e';
 
 const DLC_OPTIONS = [0, 1, 2, 3, 4, 5, 6, 7, 8];
 
@@ -18,7 +20,7 @@ export function SendFramePanel() {
   const isConnected = status === 'connected';
 
   const { frames, addFrame, removeFrame, updateFrame, sendOnce, toggleTimer, stopAll,
-    addDbcFrame, attachDbcMessage } = useSendFrameStore();
+    addDbcFrame, attachDbcMessage, setE2E } = useSendFrameStore();
 
   const dbcLoaded   = useDbcStore((s) => s.loaded);
   const dbcMessages = useDbcStore((s) => s.messages);
@@ -114,6 +116,24 @@ export function SendFramePanel() {
                 {isCollapsed ? '▸' : '▾'} {dbcMsg.signals.length} sig
               </button>
             )}
+            {/* E2E toggle — protects the frame with a rolling counter + CRC.
+                Not available together with a DBC link (E2E drives a raw template). */}
+            <button
+              style={{
+                ...btnStyle, fontSize: 10, padding: '1px 7px', whiteSpace: 'nowrap',
+                background: f.e2e ? 'rgba(245,166,35,0.15)' : 'var(--bg-panel)',
+                border: `1px solid ${f.e2e ? 'var(--accent-amber)' : 'var(--border-default)'}`,
+                color: f.e2e ? 'var(--accent-amber)' : 'var(--text-muted)',
+                opacity: f.dbc ? 0.4 : 1,
+              }}
+              disabled={!!f.dbc}
+              onClick={() => setE2E(f.id, f.e2e ? null : defaultE2EConfig())}
+              title={f.dbc
+                ? 'Remove the DBC link to use E2E on this frame'
+                : f.e2e ? 'Disable E2E protection' : 'Protect with AUTOSAR E2E (rolling counter + CRC)'}
+            >
+              E2E{f.e2e ? ' ✓' : ''}
+            </button>
           </div>
 
           {/* Input row */}
@@ -230,6 +250,9 @@ export function SendFramePanel() {
 
           {/* DBC signal editor */}
           {dbcMsg && !isCollapsed && <DbcSignalEditor frame={f} message={dbcMsg} />}
+
+          {/* E2E config editor */}
+          {f.e2e && <E2EEditor frame={f} />}
 
           {/* Feedback row */}
           {(f.lastSent || f.error) && (

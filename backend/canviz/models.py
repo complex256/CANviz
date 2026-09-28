@@ -7,7 +7,7 @@ Keeping them in one place avoids circular imports.
 
 from __future__ import annotations
 from typing import Optional, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class CANFrame(BaseModel):
@@ -46,6 +46,45 @@ class SendFrameRequest(BaseModel):
     id: int                        # Arbitration ID as integer
     data: list[int]                # Up to 8 bytes
     is_extended_id: bool = False
+
+
+class E2ECrcParams(BaseModel):
+    poly: int = 0x2F
+    init: int = 0xFF
+    xor_out: int = Field(0xFF, alias="xorOut")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class E2EConfigModel(BaseModel):
+    """Same shape as the optional "e2e" object in saved frame sets (camelCase)."""
+    profile: str = "vw_p2"
+    crc_index: int = Field(0, alias="crcIndex")
+    counter_byte: int = Field(1, alias="counterByte")
+    counter_bit_offset: int = Field(0, alias="counterBitOffset")
+    counter_width: int = Field(4, alias="counterWidth")
+    crc: E2ECrcParams = E2ECrcParams()
+    data_id_list: list[int] = Field(alias="dataIdList")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class E2EFrameRequest(BaseModel):
+    key: str = Field(min_length=1, max_length=128)  # client-chosen job id
+    id: int                        # Arbitration ID as integer
+    data: list[int]                # Template: signal bits set, counter/CRC overwritten
+    dlc: Optional[int] = None      # Defaults to len(data); template is zero-padded to it
+    is_extended_id: bool = False
+    e2e: E2EConfigModel
+
+
+class E2EStartRequest(E2EFrameRequest):
+    interval_ms: int = Field(ge=1, le=60_000)
+
+
+class E2EStopRequest(BaseModel):
+    key: str
+    forget: bool = False           # also drop the counter (frame deleted in the UI)
 
 
 class DBCEncodeRequest(BaseModel):

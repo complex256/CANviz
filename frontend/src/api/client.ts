@@ -190,3 +190,64 @@ export async function apiUploadReplayFile(file: File): Promise<string> {
   const data = await res.json();
   return data.filename as string;
 }
+// ============================================================
+// E2E-protected frames (rolling counter + CRC, sent server-side)
+// ============================================================
+
+export interface E2ECrcParams {
+  poly: number;
+  init: number;
+  xorOut: number;
+}
+
+// Mirrors the optional "e2e" object in saved frame sets. Unknown keys are
+// preserved so files written by newer versions round-trip unchanged.
+export interface E2EConfig {
+  profile: string;
+  crcIndex: number;
+  counterByte: number;
+  counterBitOffset: number;
+  counterWidth: number;
+  crc: E2ECrcParams;
+  dataIdList: number[];
+  [key: string]: unknown;
+}
+
+export interface E2EFramePayload {
+  key: string;
+  id: number;
+  data: number[];      // template: signal bits set; counter/CRC overwritten
+  dlc?: number;
+  is_extended_id: boolean;
+  e2e: E2EConfig;
+}
+
+export interface E2EJobStatus {
+  key: string;
+  id: number;
+  running: boolean;
+  interval_ms: number;
+  sent: number;
+  last_counter: number | null;
+  last_data: number[] | null;
+  error: string | null;
+}
+
+export function apiE2EStart(payload: E2EFramePayload & { interval_ms: number }) {
+  return request<E2EJobStatus>('/e2e/start', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export function apiE2ESend(payload: E2EFramePayload) {
+  return request<E2EJobStatus>('/e2e/send', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export function apiE2EStop(key: string, forget = false) {
+  return request<{ ok: boolean }>('/e2e/stop', {
+    method: 'POST',
+    body: JSON.stringify({ key, forget }),
+  });
+}
+
+export function apiE2EStopAll() {
+  return request<{ ok: boolean }>('/e2e/stop-all', { method: 'POST' });
+}

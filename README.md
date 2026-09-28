@@ -79,6 +79,13 @@ With a DBC loaded, pick a message for any frame and edit its signals by name, in
 units, instead of hand-packing bytes. Value tables become dropdowns, multiplexed signals
 follow the multiplexer, and changes apply live to frames that are already transmitting.
 
+### E2E-protected frames (AUTOSAR Profile 2)
+
+Send VW/Audi-style E2E messages whose rolling alive counter and CRC must change on every
+transmission. Toggle E2E on a frame and CANviz recomputes the counter and CRC-8H2F for each
+send, driven server-side so the sequence stays valid at speed. Ships with a VW E2E Profile 2
+preset; the CRC parameters, counter position and 16-byte Data-ID list are all configurable.
+
 ### Record and replay
 
 Record to industry-standard `.asc` and `.csv`. Replay any log file with adjustable

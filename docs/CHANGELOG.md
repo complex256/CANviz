@@ -8,6 +8,7 @@ Versions follow [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+- Send Frame: E2E-protected periodic sending (AUTOSAR E2E Profile 2, VW/Audi "vw_p2" preset). Many VW/Audi messages carry a rolling alive counter and a CRC that must change every transmission; a static repeated frame trips an E2E fault after the first message. Toggle "E2E" on a frame to recompute the counter and CRC-8H2F on every send. Because those bytes change per transmission, the periodic loop runs server-side (one asyncio task per active frame) rather than in the browser. CRC algorithm, CRC/counter byte positions, counter bit field and the 16-byte Data-ID list are configurable. New endpoints: `POST /e2e/start`, `POST /e2e/send`, `POST /e2e/stop`, `POST /e2e/stop-all`, `GET /e2e`. The saved-frame JSON schema gains an optional per-frame `e2e` object (format version 2; frames without it keep today's static behavior).
 - Send Frame: save / restore frame sets -- name and save the current transmit list, load it back later, delete saved sets
 - Send Frame: the transmit list and saved sets persist in the browser across page reloads
 - Send Frame: export / import frame sets as JSON (`*.canviz.json`) to share them or keep them with a bench setup
