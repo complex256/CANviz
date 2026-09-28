@@ -251,3 +251,78 @@ export function apiE2EStop(key: string, forget = false) {
 export function apiE2EStopAll() {
   return request<{ ok: boolean }>('/e2e/stop-all', { method: 'POST' });
 }
+
+// ============================================================
+// Scripted "compute" frames (sandboxed per-send pipeline, server-side)
+// ============================================================
+
+export interface ComputeTarget {
+  byte: number;
+  bitOffset?: number;
+  width?: number;
+}
+
+export interface ComputeCounter {
+  byte: number;
+  bitOffset: number;
+  width: number;
+  step: number;
+}
+
+export interface ComputeStep {
+  expr: string;
+  target?: ComputeTarget | null;
+  store?: string | null;
+}
+
+export interface ComputeConfig {
+  version: number;
+  counter?: ComputeCounter | null;
+  steps: ComputeStep[];
+  tables: Record<string, number[]>;
+}
+
+export interface ComputeFramePayload {
+  key: string;
+  id: number;
+  data: number[];
+  dlc?: number;
+  is_extended_id: boolean;
+  compute: ComputeConfig;
+}
+
+export interface ComputeJobStatus {
+  key: string;
+  id: number;
+  running: boolean;
+  interval_ms: number;
+  sent: number;
+  last_counter: number | null;
+  last_data: number[] | null;
+  error: string | null;
+}
+
+export function apiComputeStart(payload: ComputeFramePayload & { interval_ms: number }) {
+  return request<ComputeJobStatus>('/compute/start', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export function apiComputeSend(payload: ComputeFramePayload) {
+  return request<ComputeJobStatus>('/compute/send', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export function apiComputeStop(key: string, forget = false) {
+  return request<{ ok: boolean }>('/compute/stop', { method: 'POST', body: JSON.stringify({ key, forget }) });
+}
+
+export function apiComputeStopAll() {
+  return request<{ ok: boolean }>('/compute/stop-all', { method: 'POST' });
+}
+
+// Evaluate the pipeline without sending — used by the editor for live preview
+// and validation. Returns computed frames (or throws with a 422 message).
+export function apiComputePreview(data: number[], compute: ComputeConfig, opts?: { id?: number; dlc?: number; counter?: number; count?: number }) {
+  return request<{ frames: number[][] }>('/compute/preview', {
+    method: 'POST',
+    body: JSON.stringify({ data, compute, id: opts?.id ?? 0, dlc: opts?.dlc, counter: opts?.counter ?? 0, count: opts?.count ?? 1 }),
+  });
+}

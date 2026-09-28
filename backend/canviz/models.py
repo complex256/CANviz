@@ -87,6 +87,61 @@ class E2EStopRequest(BaseModel):
     forget: bool = False           # also drop the counter (frame deleted in the UI)
 
 
+class ComputeTargetModel(BaseModel):
+    byte: int
+    bit_offset: int = Field(0, alias="bitOffset")
+    width: int = 8
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ComputeCounterModel(BaseModel):
+    byte: int
+    bit_offset: int = Field(0, alias="bitOffset")
+    width: int = 8
+    step: int = 1
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ComputeStepModel(BaseModel):
+    expr: str
+    target: Optional[ComputeTargetModel] = None
+    store: Optional[str] = None
+
+
+class ComputeConfigModel(BaseModel):
+    version: int = 1
+    counter: Optional[ComputeCounterModel] = None
+    steps: list[ComputeStepModel]
+    tables: dict[str, list[int]] = {}
+
+
+class ComputeFrameRequest(BaseModel):
+    key: str = Field(min_length=1, max_length=128)
+    id: int
+    data: list[int]
+    dlc: Optional[int] = None
+    is_extended_id: bool = False
+    compute: ComputeConfigModel
+
+
+class ComputeStartRequest(ComputeFrameRequest):
+    interval_ms: int = Field(ge=1, le=60_000)
+
+
+class ComputePreviewRequest(BaseModel):
+    id: int = 0
+    data: list[int]
+    dlc: Optional[int] = None
+    compute: ComputeConfigModel
+    counter: int = 0
+    count: int = Field(1, ge=1, le=64)
+
+
+class ComputeStopRequest(BaseModel):
+    key: str
+    forget: bool = False
+
+
 class DBCEncodeRequest(BaseModel):
     message: str                   # DBC message name
     signals: dict[str, float] = {} # Physical values; missing signals use DBC initial value

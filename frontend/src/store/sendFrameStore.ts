@@ -3,9 +3,11 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import {
   apiSendFrame, apiDbcEncode, apiDbcDecode,
   apiE2EStart, apiE2ESend, apiE2EStop, apiE2EStopAll,
-  type E2EConfig,
+  apiComputeStart, apiComputeSend, apiComputeStop, apiComputeStopAll,
+  type E2EConfig, type ComputeConfig,
 } from '../api/client';
 import { parseE2EConfig } from './e2e';
+import { parseComputeConfig } from './compute';
 import { useDbcStore } from './dbcStore';
 import type { DbcMessage } from '../types/can';
 
@@ -36,13 +38,15 @@ export interface TransmitFrame {
   dbc:        FrameDbcLink | null;
   // AUTOSAR E2E protection: counter + CRC recomputed per send (backend-driven)
   e2e:        E2EConfig | null;
+  // Scripted per-send pipeline (sandboxed, backend-driven). Mutually exclusive with e2e.
+  compute:    ComputeConfig | null;
   isRunning:  boolean;
   lastSent:   string | null;
   error:      string | null;
 }
 
 // The persistable part of a frame — runtime state (timers, feedback) is dropped
-export type SavedFrame = Pick<TransmitFrame, 'label' | 'canId' | 'dlc' | 'data' | 'isExtended' | 'intervalMs' | 'dbc' | 'e2e'>;
+export type SavedFrame = Pick<TransmitFrame, 'label' | 'canId' | 'dlc' | 'data' | 'isExtended' | 'intervalMs' | 'dbc' | 'e2e' | 'compute'>;
 
 export interface FrameSet {
   name:    string;
@@ -52,8 +56,8 @@ export interface FrameSet {
 
 // On-disk format for Export / Import
 export const FRAME_SET_FILE_FORMAT = 'canviz-send-frames';
-// v2 adds the optional per-frame "e2e" object; v1 files still load (e2e absent).
-export const FRAME_SET_FILE_VERSION = 2;
+// v3 adds the optional per-frame "compute" pipeline; v2 added "e2e"; older files still load.
+export const FRAME_SET_FILE_VERSION = 3;
 
 export interface FrameSetFile {
   format:  typeof FRAME_SET_FILE_FORMAT;
@@ -65,7 +69,7 @@ function makeFrame(): TransmitFrame {
   return {
     id: uid(), label: '', canId: '0x123', dlc: 8,
     data: '00 00 00 00 00 00 00 00',
-    isExtended: false, intervalMs: 100, dbc: null, e2e: null,
+    isExtended: false, intervalMs: 100, dbc: null, e2e: null, compute: null,
     isRunning: false, lastSent: null, error: null,
   };
 }
@@ -77,6 +81,7 @@ function toSaved(f: TransmitFrame): SavedFrame {
     dbc: f.dbc ? { message: f.dbc.message, signals: { ...f.dbc.signals } } : null,
     // structuredClone keeps any unknown keys a newer file carried, for round-trip
     e2e: f.e2e ? structuredClone(f.e2e) : null,
+    compute: f.compute ? structuredClone(f.compute) : null,
   };
 }
 
@@ -107,6 +112,7 @@ function fromSaved(s: Partial<SavedFrame>): TransmitFrame {
     intervalMs: Number.isFinite(intervalMs) && intervalMs >= 0 ? intervalMs : base.intervalMs,
     dbc:        parseDbcLink(s.dbc),
     e2e:        parseE2EConfig(s.e2e),
+    compute:    parseComputeConfig(s.compute),
   };
 }
 
@@ -162,6 +168,16 @@ function e2ePayload(f: TransmitFrame) {
   if (data === null) throw new Error('Invalid data bytes');
   while (data.length < f.dlc) data.push(0);
   return { key: f.id, id, data: data.slice(0, f.dlc), dlc: f.dlc, is_extended_id: f.isExtended, e2e: f.e2e! };
+}
+
+// Build the payload for the server-side compute endpoints from a frame's template
+function computePayload(f: TransmitFrame) {
+  const id = parseId(f.canId);
+  if (id === null) throw new Error('Invalid CAN ID');
+  const data = parseBytes(f.data);
+  if (data === null) throw new Error('Invalid data bytes');
+  while (data.length < f.dlc) data.push(0);
+  return { key: f.id, id, data: data.slice(0, f.dlc), dlc: f.dlc, is_extended_id: f.isExtended, compute: f.compute! };
 }
 
 /**
@@ -234,6 +250,10 @@ interface SendFrameStore {
   // E2E integration
   setE2E:      (id: string, cfg: E2EConfig | null) => void;
   updateE2E:   (id: string, patch: Partial<E2EConfig>) => void;
+
+  // Scripted compute integration
+  setCompute:    (id: string, cfg: ComputeConfig | null) => void;
+  updateCompute: (id: string, cfg: ComputeConfig) => void;
 }
 
 export const useSendFrameStore = create<SendFrameStore>()(
@@ -250,8 +270,9 @@ export const useSendFrameStore = create<SendFrameStore>()(
         if (timers.has(id)) { clearInterval(timers.get(id)!); timers.delete(id); }
         dbcSeq.delete(id);
         const frame = get().frames.find((f) => f.id === id);
-        // Stop and forget any server-side E2E job for this frame
+        // Stop and forget any server-side job for this frame
         if (frame?.e2e) void apiE2EStop(id, true).catch(() => { /* ignore */ });
+        if (frame?.compute) void apiComputeStop(id, true).catch(() => { /* ignore */ });
         set((s) => ({ frames: s.frames.filter((f) => f.id !== id), dirty: true }));
       },
 
@@ -271,11 +292,11 @@ export const useSendFrameStore = create<SendFrameStore>()(
           const bytes = parseBytes(patch.data);
           if (bytes !== null) void decodeInto(id, before.dbc.message, bytes);
         }
-        // Template / DLC edit on a running E2E frame: update the server job
-        if (before?.e2e && (patch.data !== undefined || patch.dlc !== undefined ||
-            patch.canId !== undefined || patch.isExtended !== undefined)) {
-          pushE2EUpdate(id);
-        }
+        // Template / DLC edit on a running E2E or compute frame: update the job
+        const relevant = patch.data !== undefined || patch.dlc !== undefined ||
+          patch.canId !== undefined || patch.isExtended !== undefined;
+        if (before?.e2e && relevant) pushE2EUpdate(id);
+        if (before?.compute && relevant) pushComputeUpdate(id);
       },
 
       sendOnce: async (id) => {
@@ -289,6 +310,12 @@ export const useSendFrameStore = create<SendFrameStore>()(
             const bytes = job.last_data ?? [];
             lastSent = `${frame.isExtended ? '[EXT]' : '[STD]'} ${frame.canId} [${bytes.length}] ` +
               `${toHex(bytes)}  (E2E cnt ${job.last_counter})`;
+          } else if (frame.compute) {
+            // Server runs the pipeline and returns the actual bytes
+            const job = await apiComputeSend(computePayload(frame));
+            const bytes = job.last_data ?? [];
+            lastSent = `${frame.isExtended ? '[EXT]' : '[STD]'} ${frame.canId} [${bytes.length}] ` +
+              `${toHex(bytes)}  (cnt ${job.last_counter})`;
           } else {
             lastSent = await doSend(frame);
           }
@@ -311,6 +338,20 @@ export const useSendFrameStore = create<SendFrameStore>()(
             if (frame.intervalMs <= 0) return;
             patchFrame(id, { isRunning: true, error: null });
             apiE2EStart({ ...e2ePayload(frame), interval_ms: frame.intervalMs })
+              .catch((e) => patchFrame(id, { isRunning: false, error: (e as Error).message }));
+          }
+          return;
+        }
+
+        // Compute frames are likewise driven by a server-side task
+        if (frame.compute) {
+          if (frame.isRunning) {
+            void apiComputeStop(id).catch(() => { /* ignore */ });
+            patchFrame(id, { isRunning: false });
+          } else {
+            if (frame.intervalMs <= 0) return;
+            patchFrame(id, { isRunning: true, error: null });
+            apiComputeStart({ ...computePayload(frame), interval_ms: frame.intervalMs })
               .catch((e) => patchFrame(id, { isRunning: false, error: (e as Error).message }));
           }
           return;
@@ -339,9 +380,12 @@ export const useSendFrameStore = create<SendFrameStore>()(
       stopAll: () => {
         for (const timer of timers.values()) clearInterval(timer);
         timers.clear();
-        // Stop any server-side E2E jobs for frames currently running
+        // Stop any server-side jobs for frames currently running
         if (get().frames.some((f) => f.e2e && f.isRunning)) {
           void apiE2EStopAll().catch(() => { /* ignore */ });
+        }
+        if (get().frames.some((f) => f.compute && f.isRunning)) {
+          void apiComputeStopAll().catch(() => { /* ignore */ });
         }
         set((s) => ({ frames: s.frames.map((f) => ({ ...f, isRunning: false })) }));
       },
@@ -443,9 +487,22 @@ export const useSendFrameStore = create<SendFrameStore>()(
       },
 
       setE2E: (id, cfg) => {
-        patchFrame(id, { e2e: cfg, error: null });
+        // E2E and compute are mutually exclusive per frame
+        patchFrame(id, { e2e: cfg, compute: cfg ? null : get().frames.find((f) => f.id === id)?.compute ?? null, error: null });
         set({ dirty: true });
         pushE2EUpdate(id);
+      },
+
+      setCompute: (id, cfg) => {
+        patchFrame(id, { compute: cfg, e2e: cfg ? null : get().frames.find((f) => f.id === id)?.e2e ?? null, error: null });
+        set({ dirty: true });
+        pushComputeUpdate(id);
+      },
+
+      updateCompute: (id, cfg) => {
+        patchFrame(id, { compute: cfg });
+        set({ dirty: true });
+        pushComputeUpdate(id);
       },
 
       updateE2E: (id, patch) => {
@@ -510,6 +567,18 @@ function pushE2EUpdate(id: string) {
   if (!frame?.e2e || !frame.isRunning || frame.intervalMs <= 0) return;
   try {
     void apiE2EStart({ ...e2ePayload(frame), interval_ms: frame.intervalMs })
+      .catch((e) => patchFrame(id, { error: (e as Error).message }));
+  } catch (e) {
+    patchFrame(id, { error: (e as Error).message });
+  }
+}
+
+/** Same as pushE2EUpdate, for a running scripted compute frame. */
+function pushComputeUpdate(id: string) {
+  const frame = useSendFrameStore.getState().frames.find((f) => f.id === id);
+  if (!frame?.compute || !frame.isRunning || frame.intervalMs <= 0) return;
+  try {
+    void apiComputeStart({ ...computePayload(frame), interval_ms: frame.intervalMs })
       .catch((e) => patchFrame(id, { error: (e as Error).message }));
   } catch (e) {
     patchFrame(id, { error: (e as Error).message });

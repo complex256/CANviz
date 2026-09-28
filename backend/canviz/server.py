@@ -10,9 +10,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from canviz.routers import connect, frames, dbc, log, e2e
+from canviz.routers import connect, frames, dbc, log, e2e, compute
 from canviz.bus import bus_manager
 from canviz.e2e_sender import e2e_sender
+from canviz.compute_sender import compute_sender
 from canviz.ws_broadcaster import broadcaster
 from canviz.routers.replay import router as replay_router, set_broadcast_fn
 from canviz.static_serving import mount_frontend
@@ -45,6 +46,7 @@ async def lifespan(app: FastAPI):
     yield
     # shutdown - clean up bus and broadcaster gracefully
     await e2e_sender.stop_all()
+    await compute_sender.stop_all()
     await broadcaster.stop()
     await bus_manager._hard_shutdown()
 
@@ -82,6 +84,7 @@ app.include_router(connect.router)
 app.include_router(frames.router)
 app.include_router(dbc.router)
 app.include_router(e2e.router)
+app.include_router(compute.router)
 app.include_router(log.router)
 app.include_router(stats_router.router)
 app.include_router(j1939_router)

@@ -5,7 +5,9 @@ import { useSendFrameStore } from '../../store/sendFrameStore';
 import { FrameSetToolbar } from './FrameSetToolbar';
 import { DbcSignalEditor } from './DbcSignalEditor';
 import { E2EEditor } from './E2EEditor';
+import { ComputeEditor } from './ComputeEditor';
 import { defaultE2EConfig } from '../../store/e2e';
+import { defaultComputeConfig } from '../../store/compute';
 
 const DLC_OPTIONS = [0, 1, 2, 3, 4, 5, 6, 7, 8];
 
@@ -20,7 +22,7 @@ export function SendFramePanel() {
   const isConnected = status === 'connected';
 
   const { frames, addFrame, removeFrame, updateFrame, sendOnce, toggleTimer, stopAll,
-    addDbcFrame, attachDbcMessage, setE2E } = useSendFrameStore();
+    addDbcFrame, attachDbcMessage, setE2E, setCompute } = useSendFrameStore();
 
   const dbcLoaded   = useDbcStore((s) => s.loaded);
   const dbcMessages = useDbcStore((s) => s.messages);
@@ -133,6 +135,24 @@ export function SendFramePanel() {
                 : f.e2e ? 'Disable E2E protection' : 'Protect with AUTOSAR E2E (rolling counter + CRC)'}
             >
               E2E{f.e2e ? ' ✓' : ''}
+            </button>
+            {/* Compute (scripted) toggle — general per-send pipeline.
+                Mutually exclusive with a DBC link and with E2E. */}
+            <button
+              style={{
+                ...btnStyle, fontSize: 10, padding: '1px 7px', whiteSpace: 'nowrap',
+                background: f.compute ? 'rgba(59,130,246,0.15)' : 'var(--bg-panel)',
+                border: `1px solid ${f.compute ? 'var(--accent-blue)' : 'var(--border-default)'}`,
+                color: f.compute ? 'var(--accent-blue)' : 'var(--text-muted)',
+                opacity: f.dbc ? 0.4 : 1,
+              }}
+              disabled={!!f.dbc}
+              onClick={() => setCompute(f.id, f.compute ? null : defaultComputeConfig())}
+              title={f.dbc
+                ? 'Remove the DBC link to script this frame'
+                : f.compute ? 'Disable scripted values' : 'Script per-send values (sandboxed expressions)'}
+            >
+              ƒx{f.compute ? ' ✓' : ''}
             </button>
           </div>
 
@@ -253,6 +273,9 @@ export function SendFramePanel() {
 
           {/* E2E config editor */}
           {f.e2e && <E2EEditor frame={f} />}
+
+          {/* Scripted compute editor */}
+          {f.compute && <ComputeEditor frame={f} />}
 
           {/* Feedback row */}
           {(f.lastSent || f.error) && (

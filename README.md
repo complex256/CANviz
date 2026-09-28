@@ -79,6 +79,15 @@ With a DBC loaded, pick a message for any frame and edit its signals by name, in
 units, instead of hand-packing bytes. Value tables become dropdowns, multiplexed signals
 follow the multiplexer, and changes apply live to frames that are already transmitting.
 
+### Scripted per-send values
+
+For messages E2E doesn't cover — other OEM checksums, custom counters, derived signals —
+give a frame a small **compute pipeline**: an optional rolling counter plus sandboxed
+expression steps (`sum8(data[0:7])`, `crc16(...)`, `(mem('n',0)+1) & 0xFF`, …) that run on
+the backend for every transmission. Expressions are sandboxed (no imports, attributes or
+loops — only a curated set of checksum/counter helpers). "Load E2E preset" fills in the
+AUTOSAR Profile 2 pipeline as a starting point.
+
 ### E2E-protected frames (AUTOSAR Profile 2)
 
 Send VW/Audi-style E2E messages whose rolling alive counter and CRC must change on every
